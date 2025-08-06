@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cockney Rhyming Slang Translator</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 2em; }
+    textarea, button { width: 100%; font-size: 1.1em; margin-top: 1em; padding: 0.5em; }
+    .output { margin-top: 1.5em; padding: 1em; background: #f0f0f0; border-radius: 5px; }
+  </style>
+</head>
+<body>
+  <h1>Cockney Translator</h1>
+  <p>Type a sentence in English to see the Cockney rhyming slang translation:</p>
+  <textarea id="inputText" rows="4" placeholder="Enter your sentence..."></textarea>
+  <button onclick="translate()">Translate</button>
+  <div class="output" id="output"></div>
+
+  <script>
+    const API_URL = "https://your-api-name.onrender.com/api/slang";
+    let slangDict = {};
+
+    async function loadSlang() {
+      const res = await fetch(API_URL);
+      slangDict = await res.json();
+    }
+
+    async function translate() {
+      if (Object.keys(slangDict).length === 0) await loadSlang();
+      const input = document.getElementById("inputText").value;
+      const words = input.split(/(\b)/);
+
+      const translated = words.map(word => {
+        const cleaned = word.toLowerCase().replace(/[^a-z]/g, "");
+        return slangDict[cleaned] ? slangDict[cleaned] : word;
+      }).join("");
+
+      document.getElementById("output").textContent = translated;
+    }
+  </script>
+</body>
+</html>
