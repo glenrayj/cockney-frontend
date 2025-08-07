@@ -238,8 +238,8 @@
     // ===== INIT =====
     (async function init(){
       await loadIndex();
-      INPUT.addEventListener("input",  renderOutput); // live output while typing
-      BTN.addEventListener("click",    recompute);    // recompute choices on click
+INPUT.addEventListener("input",  recompute); // rebuild choices + output on each keystroke
+BTN.addEventListener("click",    recompute);
       const SAMPLE = document.getElementById("sampleBtn");
       if (SAMPLE) SAMPLE.addEventListener("click", () => {
         INPUT.value = "I ran up the stairs and called my wife on the phone about the money.";
