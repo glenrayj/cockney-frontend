@@ -6,6 +6,7 @@
   <title>Cockney Rhyming Slang Translator</title>
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="theme-color" content="#111111" />
+  <link rel="icon" href="data:," /> <!-- inline favicon to avoid 404 -->
   <style>
     :root { color-scheme: light dark; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 16px; line-height: 1.35; }
@@ -13,28 +14,31 @@
     p.hint { color: #666; margin: 0 0 12px; }
     textarea { width: 100%; font-size: 16px; padding: 12px; border-radius: 10px; border: 1px solid #ddd; outline: none; }
     .row { display:flex; gap: 12px; align-items:center; margin-top: 10px; }
-    .btn { appearance:none; border:0; border-radius:10px; padding:12px 14px; font-size:16px; background:#111; color:#fff; width:100%; }
+    .btn { appearance:none; border:0; border-radius:10px; padding:12px 14px; font-size:16px; background:#111; color:#fff; }
+    .btn.wide { width:100%; }
     .panel { margin-top: 14px; padding: 12px; background:#f5f5f7; border-radius: 12px; }
-    .choice { display:flex; align-items:center; justify-content:space-between; gap: 10px; padding:10px 0; border-bottom:1px solid #ececec; }
+    .choice { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 0; border-bottom:1px solid #ececec; }
     .choice:last-child { border-bottom:none; }
-    .choice label { font-weight:600; min-width: 110px; text-transform: lowercase; }
+    .choice label { font-weight:600; min-width:110px; text-transform: lowercase; }
     .choice small { color:#666; }
     select { flex:1; font-size: 16px; padding:10px; border-radius:10px; border:1px solid #ddd; background:#fff; }
     .output { white-space: pre-wrap; margin-top: 8px; background:#fafafa; border:1px solid #eee; border-radius:12px; padding:12px; min-height: 64px; font-size: 16px; }
     footer { margin-top: 14px; font-size: 12px; color:#888; text-align:center; }
-    @media (hover:hover) { .btn:hover { opacity:.9; } }
+    #debug { margin: 10px 0; font: 12px/1.3 -apple-system,BlinkMacSystemFont,sans-serif; color:#777; }
+    .pill { background:#222; color:#fff; padding:3px 8px; border-radius:999px; font-size:12px; margin-left:6px; }
   </style>
 </head>
 <body>
   <h1>Cockney Translator</h1>
-  <p class="hint">Type your English sentence. Pick your preferred rhyming variant when prompted. Optimized for iPhone.</p>
+  <div id="debug">Loading…</div>
+  <p class="hint">Type your English sentence. Pick a rhyming variant when prompted.</p>
 
   <textarea id="inputText" rows="4" placeholder="Type English here…"></textarea>
   <div class="row">
     <button class="btn" id="translateBtn">Translate</button>
+    <button class="btn" id="sampleBtn" title="Try a sample">Sample</button>
   </div>
 
-  <!-- Variant chooser (appears only when matches are found) -->
   <div id="variantPanel" class="panel" hidden>
     <strong>Pick your slang variants</strong>
     <div id="choices"></div>
@@ -48,214 +52,193 @@
   <footer>© bencockney.rocks</footer>
 
   <script>
-    // ===== CONFIG =====
-    // Update these if your backend URL changes:
-    const VARIANTS_URL = "https://cockney-agent-2.onrender.com/api/slang_variants"; // preferred endpoint
-    const FALLBACK_URL = "https://cockney-agent-2.onrender.com/api/slang";          // fallback if variants not available
+    // ===== CONFIG: update if your backend URL changes =====
+    const API_ORDER = [
+      "https://cockney-agent-2.onrender.com/api/slang_index",     // best: normalized keys
+      "https://cockney-agent-2.onrender.com/api/slang_variants",  // arrays
+      "https://cockney-agent-2.onrender.com/api/slang"            // single phrases
+    ];
 
     // ===== STATE =====
-    let variantsMap = {};  // original: meaning -> [variants]
-    let indexMap = {};     // normalizedMeaning -> [variants] (for robust matching)
+    let indexMap = {};     // normalizedMeaning -> [variants]
     let selectionMap = {}; // normalizedMeaning -> chosen variant
 
+    // ===== DOM =====
+    const $ = (id) => document.getElementById(id);
+    const INPUT = $("inputText");
+    const BTN   = $("translateBtn");
+    const PANEL = $("variantPanel");
+    const CHOICES = $("choices");
+    const OUT   = $("output");
+    const DEBUG = $("debug");
+
+    const setDebug = (msg) => { DEBUG.innerHTML = msg; console.log("[debug]", msg.replace(/<[^>]*>/g,'')); };
+
     // ===== NORMALIZATION HELPERS =====
+    const stripOuterQuotes = (s) => String(s).replace(/^[\'\"\s]+|[\'\"\s]+$/g, "");
     function normalizeMeaningKey(s) {
-      if (!s) return "";
-      let w = s.toLowerCase();
-
-      // strip parentheses content: "stairs (steps)" -> "stairs"
-      w = w.replace(/\(.*?\)/g, " ");
-
-      // remove leading articles: "the wife" -> "wife"
-      w = w.replace(/^(the|a|an)\s+/g, "");
-
-      // strip non-letters except apostrophes
-      w = w.replace(/[^a-z'\s]/g, " ");
-
-      // collapse spaces
+      let w = String(s).toLowerCase();
+      w = w.replace(/\(.*?\)/g, " ");           // (notes) -> ''
+      w = w.replace(/^(the|a|an)\s+/, "");      // 'the wife' -> 'wife'
+      w = w.replace(/[^a-z'\s]/g, " ");         // drop punctuation
       w = w.replace(/\s+/g, " ").trim();
-
-      // possessive: "wife's" -> "wife"
-      w = w.replace(/'s$/, "");
-
-      // simple plural handling
-      if (w.endsWith("ies")) w = w.slice(0, -3) + "y"; // babies -> baby
-      else if (w.endsWith("es")) w = w.slice(0, -2);   // phones -> phon(e) heuristic
-      else if (w.endsWith("s")) w = w.slice(0, -1);    // stairs -> stair
-
+      w = w.replace(/'s$/, "");                 // wife's -> wife
+      if (w.endsWith("ies")) w = w.slice(0,-3)+"y";
+      else if (w.endsWith("es")) w = w.slice(0,-2);
+      else if (w.endsWith("s")) w = w.slice(0,-1);
       return w;
     }
+    const normalizeToken = (tok) => normalizeMeaningKey(String(tok).toLowerCase().replace(/[^a-z'\s]/g,""));
+    const tokenize = (text) => String(text).split(/(\b)/);
+    const splitParts = (meaning) =>
+      String(meaning).split(/[,;/]|(?:\s+or\s+)/gi).map(stripOuterQuotes).filter(Boolean);
 
-    function normalizeToken(tok) {
-      // keep apostrophes for possessives before stripping
-      const raw = tok.toLowerCase().replace(/[^a-z'\s]/g, "");
-      return normalizeMeaningKey(raw);
-    }
+    // ===== LOAD & INDEX =====
+    async function loadIndex() {
+      // Try endpoints in order, cache-busting each time
+      let raw, used = null;
+      for (const url of API_ORDER) {
+        try {
+          const r = await fetch(url + "?t=" + Date.now(), { cache: "no-store" });
+          if (r.ok) { raw = await r.json(); used = url; break; }
+        } catch (e) {}
+      }
+      if (!raw) { setDebug("Failed to load API. Using aliases only."); raw = {}; }
 
-    // ===== DATA LOAD =====
-    async function loadDictionary() {
-      try {
-        // cache-bust so updates show immediately
-        const res = await fetch(VARIANTS_URL + "?t=" + Date.now(), { cache: 'no-store' });
-        if (!res.ok) throw new Error('variants endpoint not available');
-        variantsMap = await res.json();
-      } catch (e) {
-        const res = await fetch(FALLBACK_URL + "?t=" + Date.now(), { cache: 'no-store' });
-        const single = await res.json();
-        // Upgrade to variant arrays by creating [phrase, shortened]
-        variantsMap = Object.fromEntries(Object.entries(single).map(([meaning, phrase]) => {
-          const parts = (phrase || "").split(/\s+/).filter(Boolean);
-          const shortened = parts.length > 1 ? parts.slice(0, -1).join(" ") : phrase;
-          const arr = [phrase];
-          if (shortened && shortened.length >= 3 && shortened !== phrase) arr.push(shortened);
-          return [meaning, arr];
-        }));
+      // Convert raw into a normalized index of arrays
+      let asArrays = {};
+      for (const [meaning, val] of Object.entries(raw)) {
+        if (Array.isArray(val)) {
+          asArrays[meaning] = val;
+        } else {
+          const phrase = String(val || "");
+          const parts = phrase.split(/\s+/).filter(Boolean);
+          const short = parts.length > 1 ? parts.slice(0, -1).join(" ") : phrase;
+          asArrays[meaning] = (short && short !== phrase) ? [phrase, short] : [phrase];
+        }
       }
 
-// Build normalized index for resilient matching
-indexMap = {};
+      indexMap = {};
+      let added = 0;
+      for (const [meaning, arr] of Object.entries(asArrays)) {
+        const parts = splitParts(meaning);
+        const keys = parts.length ? parts : [meaning];
+        keys.forEach(k => {
+          const norm = normalizeMeaningKey(k);
+          if (norm && !indexMap[norm]) { indexMap[norm] = arr; added++; }
+        });
+      }
 
-function stripOuterQuotes(s) {
-  return s.replace(/^["'\s]+|["'\s]+$/g, ""); // trim leading/trailing quotes and spaces
-}
+      // Safety-net aliases for common words
+      const aliases = {
+        stairs: ["apples and pears","apples"],
+        wife:   ["trouble and strife","trouble"],
+        phone:  ["dog and bone","dog"],
+        money:  ["bees and honey","bees"],
+        tea:    ["Rosie Lee","Rosie"],
+        head:   ["loaf of bread","loaf"],
+        feet:   ["plates of meat","plates"],
+        look:   ["butcher's hook","butcher's"]
+      };
+      for (const [k,v] of Object.entries(aliases)) if (!indexMap[k]) indexMap[k] = v;
 
-// Split meanings on common separators so we index synonyms too
-function splitMeaningIntoParts(meaning) {
-  // e.g. `"charlie", a street name for cocaine` -> ["charlie", "a street name for cocaine"]
-  // e.g. "feet / toes" -> ["feet", "toes"]
-  return meaning
-    .split(/[,;/]|(?:\s+\bor\b\s+)/gi)  // commas, semicolons, slashes, " or "
-    .map(part => stripOuterQuotes(part))
-    .filter(Boolean);
-}
-
-for (const [meaning, arr] of Object.entries(variantsMap)) {
-  const parts = splitMeaningIntoParts(meaning);
-  if (parts.length === 0) {
-    const norm = normalizeMeaningKey(meaning);
-    if (norm && !indexMap[norm]) indexMap[norm] = arr;
-    continue;
-  }
-  for (const part of parts) {
-    const norm = normalizeMeaningKey(part);
-    if (norm && !indexMap[norm]) indexMap[norm] = arr;
-  }
-}
+      const rawCount = Object.keys(raw).length;
+      const idxCount = Object.keys(indexMap).length;
+      const which = used ? used.split("/api/")[1] : "aliases";
+      setDebug(`Loaded <span class="pill">${rawCount}</span> via <b>${which}</b> | Indexed <span class="pill">${idxCount}</span> meanings`);
     }
 
-    // ===== MATCHING & UI =====
-    function tokenize(text) { return text.split(/(\b)/); }
-
+    // ===== MATCH / UI =====
     function getVariantsForToken(tok) {
       const norm = normalizeToken(tok);
       if (norm && indexMap[norm]) return indexMap[norm];
-
-      // last-ditch plural-y fallbacks
-      if (indexMap[norm + "s"]) return indexMap[norm + "s"];
-      if (norm.endsWith("y") && indexMap[norm.slice(0, -1) + "ies"]) return indexMap[norm.slice(0, -1) + "ies"];
+      if (indexMap[norm + "s"]) return indexMap[norm + "s"];                         // plural fallback
+      if (norm.endsWith("y") && indexMap[norm.slice(0,-1) + "ies"]) return indexMap[norm.slice(0,-1) + "ies"]; // y/ies fallback
       return null;
     }
 
     function buildChoices(tokens) {
-      const container = document.getElementById("choices");
-      container.innerHTML = "";
+      CHOICES.innerHTML = "";
       const seen = new Set();
       const matches = [];
 
       tokens.forEach((t) => {
-        const variants = getVariantsForToken(t);
-        const meaningKey = normalizeToken(t);
-        if (variants && meaningKey && !seen.has(meaningKey)) {
-          seen.add(meaningKey);
-          matches.push({ meaning: meaningKey, variants });
-        }
+        const v = getVariantsForToken(t);
+        const key = normalizeToken(t);
+        if (v && key && !seen.has(key)) { seen.add(key); matches.push({ meaning: key, variants: v }); }
       });
 
-      document.getElementById("variantPanel").hidden = matches.length === 0;
+      PANEL.hidden = matches.length === 0;
 
       matches.forEach(({ meaning, variants }) => {
         const row = document.createElement("div");
         row.className = "choice";
 
-        const label = document.createElement("label");
-        label.textContent = meaning;
-        label.htmlFor = `sel-${meaning}`;
-
-        const note = document.createElement("small");
-        note.textContent = "choose a rhyme";
-
-        const select = document.createElement("select");
-        select.id = `sel-${meaning}`;
-        variants.forEach((v) => {
-          const opt = document.createElement("option");
-          opt.value = v;
-          opt.textContent = v;
-          select.appendChild(opt);
-        });
-
-        // keep previous selection if user picked one
-        if (selectionMap[meaning]) select.value = selectionMap[meaning];
-        else selectionMap[meaning] = variants[0];
-
-        select.addEventListener("change", () => {
-          selectionMap[meaning] = select.value;
-          renderOutput();
-        });
-
         const left = document.createElement("div");
         left.style.display = "flex";
         left.style.flexDirection = "column";
-        left.appendChild(label);
-        left.appendChild(note);
+        const label = document.createElement("label");
+        label.textContent = meaning;
+        const note = document.createElement("small");
+        note.textContent = "choose a rhyme";
+        left.appendChild(label); left.appendChild(note);
+
+        const select = document.createElement("select");
+        variants.forEach(v => {
+          const opt = document.createElement("option");
+          opt.value = v; opt.textContent = v; select.appendChild(opt);
+        });
+        if (selectionMap[meaning]) select.value = selectionMap[meaning];
+        else selectionMap[meaning] = variants[0];
+        select.addEventListener("change", () => { selectionMap[meaning] = select.value; renderOutput(); });
 
         row.appendChild(left);
         row.appendChild(select);
-        container.appendChild(row);
+        CHOICES.appendChild(row);
       });
     }
 
     function preserveCase(originalToken, replacement) {
-      const wordOnly = originalToken.match(/[A-Za-z']+/);
-      if (!wordOnly) return replacement;
-      const w = wordOnly[0];
-      if (w[0] === w[0].toUpperCase()) {
-        return replacement.charAt(0).toUpperCase() + replacement.slice(1);
-      }
-      return replacement;
+      const m = originalToken.match(/[A-Za-z']+/);
+      if (!m) return replacement;
+      return m[0][0] === m[0][0].toUpperCase()
+        ? replacement.charAt(0).toUpperCase() + replacement.slice(1)
+        : replacement;
     }
 
-    function renderOutput() {
-      const text = document.getElementById("inputText").value;
-      const tokens = tokenize(text);
+    // Expose this globally so it’s always callable
+    window.renderOutput = function renderOutput() {
+      const tokens = tokenize(INPUT.value);
       const out = tokens.map(tok => {
         const v = getVariantsForToken(tok);
         if (v) {
-          const meaning = normalizeToken(tok);
-          const chosen = selectionMap[meaning] || v[0];
+          const key = normalizeToken(tok);
+          const chosen = selectionMap[key] || v[0];
           return preserveCase(tok, chosen);
         }
         return tok;
       }).join("");
-      document.getElementById("output").textContent = out;
+      OUT.textContent = out;
+    };
+
+    function recompute() {
+      const tokens = tokenize(INPUT.value);
+      buildChoices(tokens);
+      renderOutput();
     }
 
-    async function init() {
-      await loadDictionary();
-      const input = document.getElementById("inputText");
-      const btn = document.getElementById("translateBtn");
-
-      const recompute = () => {
-        const tokens = tokenize(input.value);
-        buildChoices(tokens);
-        renderOutput();
-      };
-
-      input.addEventListener("input", recompute);
-      btn.addEventListener("click", recompute);
-      recompute(); // initial render
-    }
-
-    init();
+    // ===== INIT =====
+    (async function init(){
+      await loadIndex();
+      INPUT.addEventListener("input",  recompute);
+      BTN.addEventListener("click",    recompute);
+      const SAMPLE = document.getElementById("sampleBtn");
+      if (SAMPLE) SAMPLE.addEventListener("click", () => {
+        INPUT.value = "I ran up the stairs and called my wife on the phone about the money.";
+        recompute();
+      });
+      recompute();
+    })();
   </script>
 </body>
 </html>
