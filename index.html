@@ -112,13 +112,35 @@
         }));
       }
 
-      // Build normalized index for resilient matching
-      indexMap = {};
-      for (const [meaning, arr] of Object.entries(variantsMap)) {
-        const norm = normalizeMeaningKey(meaning);
-        if (!norm) continue;
-        if (!indexMap[norm]) indexMap[norm] = arr;
-      }
+// Build normalized index for resilient matching
+indexMap = {};
+
+function stripOuterQuotes(s) {
+  return s.replace(/^["'\s]+|["'\s]+$/g, ""); // trim leading/trailing quotes and spaces
+}
+
+// Split meanings on common separators so we index synonyms too
+function splitMeaningIntoParts(meaning) {
+  // e.g. `"charlie", a street name for cocaine` -> ["charlie", "a street name for cocaine"]
+  // e.g. "feet / toes" -> ["feet", "toes"]
+  return meaning
+    .split(/[,;/]|(?:\s+\bor\b\s+)/gi)  // commas, semicolons, slashes, " or "
+    .map(part => stripOuterQuotes(part))
+    .filter(Boolean);
+}
+
+for (const [meaning, arr] of Object.entries(variantsMap)) {
+  const parts = splitMeaningIntoParts(meaning);
+  if (parts.length === 0) {
+    const norm = normalizeMeaningKey(meaning);
+    if (norm && !indexMap[norm]) indexMap[norm] = arr;
+    continue;
+  }
+  for (const part of parts) {
+    const norm = normalizeMeaningKey(part);
+    if (norm && !indexMap[norm]) indexMap[norm] = arr;
+  }
+}
     }
 
     // ===== MATCHING & UI =====
