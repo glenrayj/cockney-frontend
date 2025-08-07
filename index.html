@@ -30,133 +30,186 @@
   const VARIANTS_URL = "https://cockney-agent-2.onrender.com/api/slang_variants"; // preferred
   const FALLBACK_URL = "https://cockney-agent-2.onrender.com/api/slang";          // fallback if variants not available
 
-  let variantsMap = {};   // meaning -> [variants]
-  let selectionMap = {};  // meaning -> chosen variant string
+<script>
+// Keep your VARIANTS_URL / FALLBACK_URL and loadDictionary() as-is
 
-  // Load variants (or fallback to single variant per meaning)
-  async function loadDictionary() {
-    try {
-      const res = await fetch(VARIANTS_URL, { cache: 'no-store' });
-      if (!res.ok) throw new Error('variants endpoint not available');
-      variantsMap = await res.json();
-    } catch (e) {
-      const res = await fetch(FALLBACK_URL, { cache: 'no-store' });
-      const single = await res.json();
-      // Upgrade to variant arrays by creating [phrase, shortened]
-      variantsMap = Object.fromEntries(Object.entries(single).map(([meaning, phrase]) => {
-        const parts = phrase.split(/\s+/);
-        const shortened = parts.length > 1 ? parts.slice(0, -1).join(' ') : phrase;
-        const arr = [phrase];
-        if (shortened && shortened.length >= 3 && shortened !== phrase) arr.push(shortened);
-        return [meaning, arr];
-      }));
+let variantsMap = {};   // original meaning -> [variants]
+let indexMap = {};      // normalizedMeaning -> [variants]
+let selectionMap = {};  // normalizedMeaning -> chosen variant
+
+function normalizeMeaningKey(s) {
+  if (!s) return "";
+  let w = s.toLowerCase();
+
+  // strip parentheses content: "stairs (steps)" -> "stairs"
+  w = w.replace(/\(.*?\)/g, " ");
+
+  // remove leading articles: "the wife" -> "wife"
+  w = w.replace(/^(the|a|an)\s+/g, "");
+
+  // remove non-letters except apostrophes
+  w = w.replace(/[^a-z'\s]/g, " ");
+
+  // collapse spaces
+  w = w.replace(/\s+/g, " ").trim();
+
+  // simple possessive handling: "wife's" -> "wife"
+  w = w.replace(/'s$/, "");
+
+  // simple plural handling
+  if (w.endsWith("ies")) w = w.slice(0, -3) + "y"; // babies -> baby
+  else if (w.endsWith("es")) w = w.slice(0, -2);   // phones -> phon(e) (good-enough heuristic)
+  else if (w.endsWith("s")) w = w.slice(0, -1);    // stairs -> stair
+
+  return w;
+}
+
+async function loadDictionary() {
+  try {
+    const res = await fetch(VARIANTS_URL + "?t=" + Date.now(), { cache: 'no-store' });
+    if (!res.ok) throw new Error('variants endpoint not available');
+    variantsMap = await res.json();
+  } catch {
+    const res = await fetch(FALLBACK_URL + "?t=" + Date.now(), { cache: 'no-store' });
+    const single = await res.json();
+    // upgrade single map to array
+    variantsMap = Object.fromEntries(Object.entries(single).map(([meaning, phrase]) => {
+      const parts = phrase.split(/\s+/);
+      const shortened = parts.length > 1 ? parts.slice(0, -1).join(' ') : phrase;
+      const arr = [phrase];
+      if (shortened && shortened.length >= 3 && shortened !== phrase) arr.push(shortened);
+      return [meaning, arr];
+    }));
+  }
+
+  // Build normalized index so mismatched keys (e.g., "the wife", "stairs (steps)") still match
+  indexMap = {};
+  for (const [meaning, arr] of Object.entries(variantsMap)) {
+    const norm = normalizeMeaningKey(meaning);
+    if (!norm) continue;
+    // if multiple sources collapse to same norm key, keep the first we saw
+    if (!indexMap[norm]) indexMap[norm] = arr;
+  }
+}
+
+// Tokenization and matching
+function tokenize(text) { return text.split(/(\b)/); }
+
+function normalizeToken(tok) {
+  // keep apostrophes for possessives before we strip them
+  let w = tok.toLowerCase().replace(/[^a-z'\s]/g, "");
+  return normalizeMeaningKey(w); // reuse the same normalization as meanings
+}
+
+function getVariantsForToken(tok) {
+  const norm = normalizeToken(tok);
+  if (norm && indexMap[norm]) return indexMap[norm];
+
+  // last-ditch fallbacks (plural back and forth)
+  if (indexMap[norm + "s"]) return indexMap[norm + "s"];
+  if (norm.endsWith("y") && indexMap[norm.slice(0, -1) + "ies"]) return indexMap[norm.slice(0, -1) + "ies"];
+
+  return null;
+}
+
+function preserveCase(originalToken, replacement) {
+  const wordOnly = originalToken.match(/[A-Za-z']+/);
+  if (!wordOnly) return replacement;
+  const w = wordOnly[0];
+  if (w[0] === w[0].toUpperCase()) {
+    return replacement.charAt(0).toUpperCase() + replacement.slice(1);
+  }
+  return replacement;
+}
+
+function buildChoices(tokens) {
+  const container = document.getElementById('choices');
+  container.innerHTML = '';
+  const seen = new Set();
+  const matches = [];
+
+  tokens.forEach((t) => {
+    const variants = getVariantsForToken(t);
+    const meaningKey = normalizeToken(t);
+    if (variants && meaningKey && !seen.has(meaningKey)) {
+      seen.add(meaningKey);
+      matches.push({ meaning: meaningKey, variants });
     }
-  }
+  });
 
-  // Tokenize while keeping boundaries (spaces/punct)
-  function tokenize(text) { return text.split(/(\b)/); }
-  function cleanWord(tok) { return tok.toLowerCase().replace(/[^a-z']/g, ""); }
+  document.getElementById('variantPanel').hidden = matches.length === 0;
 
-  // Build the live choices UI for any meanings found in the input
-  function buildChoices(tokens) {
-    const container = document.getElementById('choices');
-    container.innerHTML = '';
+  matches.forEach(({ meaning, variants }) => {
+    const row = document.createElement('div');
+    row.className = 'choice';
 
-    const seen = new Set();
-    const matches = [];
-    tokens.forEach((t) => {
-      const key = cleanWord(t);
-      if (key && variantsMap[key] && !seen.has(key)) {
-        seen.add(key);
-        matches.push({ meaning: key, variants: variantsMap[key] });
-      }
+    const label = document.createElement('label');
+    label.textContent = meaning;
+    label.htmlFor = `sel-${meaning}`;
+
+    const note = document.createElement('small');
+    note.textContent = 'choose a rhyme';
+
+    const select = document.createElement('select');
+    select.id = `sel-${meaning}`;
+    variants.forEach((v) => {
+      const opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = v;
+      select.appendChild(opt);
     });
+    if (selectionMap[meaning]) select.value = selectionMap[meaning];
+    else selectionMap[meaning] = variants[0];
 
-    const panel = document.getElementById('variantPanel');
-    panel.hidden = matches.length === 0;
-
-    matches.forEach(({ meaning, variants }) => {
-      const row = document.createElement('div');
-      row.className = 'choice';
-
-      const label = document.createElement('label');
-      label.textContent = meaning;
-      label.htmlFor = `sel-${meaning}`;
-
-      const note = document.createElement('small');
-      note.textContent = 'choose a rhyme';
-
-      const select = document.createElement('select');
-      select.id = `sel-${meaning}`;
-      variants.forEach((v) => {
-        const opt = document.createElement('option');
-        opt.value = v;
-        opt.textContent = v;
-        select.appendChild(opt);
-      });
-      // keep previous selection if user picked one
-      if (selectionMap[meaning]) select.value = selectionMap[meaning];
-      else selectionMap[meaning] = variants[0];
-
-      select.addEventListener('change', () => {
-        selectionMap[meaning] = select.value;
-        renderOutput();
-      });
-
-      const left = document.createElement('div');
-      left.style.display = 'flex';
-      left.style.flexDirection = 'column';
-      left.appendChild(label);
-      left.appendChild(note);
-
-      row.appendChild(left);
-      row.appendChild(select);
-      container.appendChild(row);
-    });
-  }
-
-  function preserveCase(originalToken, replacement) {
-    const wordOnly = originalToken.match(/[A-Za-z']+/);
-    if (!wordOnly) return replacement;
-    const w = wordOnly[0];
-    if (w[0] === w[0].toUpperCase()) {
-      return replacement.charAt(0).toUpperCase() + replacement.slice(1);
-    }
-    return replacement;
-  }
-
-  function renderOutput() {
-    const text = document.getElementById('inputText').value;
-    const tokens = tokenize(text);
-    const out = tokens.map(tok => {
-      const key = cleanWord(tok);
-      if (key && variantsMap[key]) {
-        const chosen = selectionMap[key] || variantsMap[key][0];
-        return preserveCase(tok, chosen);
-      }
-      return tok;
-    }).join('');
-    document.getElementById('output').textContent = out;
-  }
-
-  async function init() {
-    await loadDictionary();
-    const input = document.getElementById('inputText');
-    const btn = document.getElementById('translateBtn');
-
-    const recompute = () => {
-      const tokens = tokenize(input.value);
-      buildChoices(tokens);
+    select.addEventListener('change', () => {
+      selectionMap[meaning] = select.value;
       renderOutput();
-    };
+    });
 
-    input.addEventListener('input', recompute);
-    btn.addEventListener('click', recompute);
+    const left = document.createElement('div');
+    left.style.display = 'flex';
+    left.style.flexDirection = 'column';
+    left.appendChild(label);
+    left.appendChild(note);
 
-    recompute(); // initial
-  }
+    row.appendChild(left);
+    row.appendChild(select);
+    container.appendChild(row);
+  });
+}
 
-  init();
+function renderOutput() {
+  const text = document.getElementById('inputText').value;
+  const tokens = tokenize(text);
+  const out = tokens.map(tok => {
+    const v = getVariantsForToken(tok);
+    if (v) {
+      const meaning = normalizeToken(tok);
+      const chosen = selectionMap[meaning] || v[0];
+      return preserveCase(tok, chosen);
+    }
+    return tok;
+  }).join('');
+  document.getElementById('output').textContent = out;
+}
+
+async function init() {
+  await loadDictionary();
+  const input = document.getElementById('inputText');
+  const btn = document.getElementById('translateBtn');
+
+  const recompute = () => {
+    const tokens = tokenize(input.value);
+    buildChoices(tokens);
+    renderOutput();
+  };
+
+  input.addEventListener('input', recompute);
+  btn.addEventListener('click', recompute);
+  recompute();
+}
+
+init();
 </script>
 </body>
 </html>
